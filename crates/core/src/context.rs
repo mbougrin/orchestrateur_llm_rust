@@ -1,7 +1,18 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use llm_clients::{LlmModel, TokenUsage};
+use llm_clients::{LlmModel, StreamSink, TokenUsage};
+use file_analyzer::GitContext;
 use crate::llm_arch_config::LlmArchConfig;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CostProfile {
+    /// Default tier routing (Sonnet/Haiku/Local by priority).
+    Balanced,
+    /// Force Sonnet for High/Medium tasks, Haiku for Low — highest quality.
+    Quality,
+    /// Force all tasks to Local — zero API cost.
+    Cheap,
+}
 
 #[derive(Clone)]
 pub struct AppContext {
@@ -16,6 +27,20 @@ pub struct AppContext {
     pub max_retries: u8,
     pub local_confidence_threshold: f32,
     pub llm_arch: LlmArchConfig,
+    /// Set by the TUI to receive streaming chunks. None in non-interactive mode.
+    pub stream_sink: Option<StreamSink>,
+    /// Content of ORCHESTRATEUR.md / .orchestrateur/instructions.md if found.
+    pub project_memory: String,
+    /// Refreshed at each planning step.
+    pub git: GitContext,
+    /// Files added via /add — injected in agent context.
+    pub manual_context: Arc<Mutex<Vec<(String, String)>>>,
+    /// If true, BuilderAgent writes without threshold check.
+    pub auto_write: bool,
+    /// When true, agents log full LLM responses to the log panel.
+    pub verbose: bool,
+    /// Cost/quality routing override.
+    pub profile: CostProfile,
 }
 
 impl AppContext {
@@ -39,6 +64,13 @@ impl AppContext {
             max_retries: 3,
             local_confidence_threshold: 0.85,
             llm_arch: LlmArchConfig::load(),
+            stream_sink: None,
+            project_memory: String::new(),
+            git: GitContext::default(),
+            manual_context: Arc::new(Mutex::new(Vec::new())),
+            auto_write: true,
+            verbose: false,
+            profile: CostProfile::Balanced,
         }
     }
 

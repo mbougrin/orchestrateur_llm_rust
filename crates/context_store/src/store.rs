@@ -79,6 +79,32 @@ impl ContextStore {
                 last_modified TEXT,
                 analyzed_at TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS agent_checkpoints (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                agent_type TEXT NOT NULL,
+                step TEXT NOT NULL,
+                partial_output TEXT,
+                files_read TEXT,
+                created_at TEXT,
+                FOREIGN KEY(task_id) REFERENCES tasks(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS prompt_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS manual_context (
+                path TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                content TEXT NOT NULL,
+                added_at TEXT NOT NULL
+            );
         ")?;
         Ok(())
     }
@@ -262,6 +288,98 @@ impl ContextStore {
 
     // ── File summaries ────────────────────────────────────────────────────────
 
+    // ── Agent checkpoints ─────────────────────────────────────────────────────
+
+    pub fn save_checkpoint(&self, id: &str, task_id: &str, session_id: &str, agent_type: &str, step: &str, partial_output: &str, files_read: &[String]) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let files_json = serde_json::to_string(files_read).unwrap_or_default();
+        self.conn.execute(
+            "INSERT OR REPLACE INTO agent_checkpoints (id, task_id, session_id, agent_type, step, partial_output, files_read, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![id, task_id, session_id, agent_type, step, partial_output, files_json, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_checkpoint(&self, task_id: &str) -> Result<Option<CheckpointData>> {
+        let result = self.conn.query_row(
+            "SELECT id, task_id, session_id, agent_type, step, partial_output, files_read
+             FROM agent_checkpoints WHERE task_id = ?1 ORDER BY rowid DESC LIMIT 1",
+            params![task_id],
+            |row| Ok(CheckpointData {
+                id: row.get(0)?,
+                task_id: row.get(1)?,
+                session_id: row.get(2)?,
+                agent_type: row.get(3)?,
+                step: row.get(4)?,
+                partial_output: row.get(5)?,
+                files_read: row.get(6)?,
+            }),
+        );
+        match result {
+            Ok(c) => Ok(Some(c)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn delete_checkpoints(&self, task_id: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM agent_checkpoints WHERE task_id = ?1", params![task_id])?;
+        Ok(())
+    }
+
+    // ── Prompt history ────────────────────────────────────────────────────────
+
+    pub fn add_prompt(&self, session_id: &str, prompt: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO prompt_history (session_id, prompt, created_at) VALUES (?1, ?2, ?3)",
+            params![session_id, prompt, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_prompts(&self, session_id: &str, limit: usize) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT prompt FROM prompt_history WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2"
+        )?;
+        let prompts = stmt.query_map(params![session_id, limit as i64], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(prompts)
+    }
+
+    // ── Manual context ────────────────────────────────────────────────────────
+
+    pub fn add_manual_context(&self, path: &str, session_id: &str, content: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT OR REPLACE INTO manual_context (path, session_id, content, added_at) VALUES (?1, ?2, ?3, ?4)",
+            params![path, session_id, content, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_manual_context(&self, session_id: &str) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path, content FROM manual_context WHERE session_id = ?1"
+        )?;
+        let items = stmt.query_map(params![session_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(items)
+    }
+
+    pub fn clear_manual_context(&self, session_id: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM manual_context WHERE session_id = ?1", params![session_id])?;
+        Ok(())
+    }
+
+    pub fn remove_manual_context(&self, path: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM manual_context WHERE path = ?1", params![path])?;
+        Ok(())
+    }
+
     pub fn set_file_summary(&self, file_path: &str, summary: &str, language: &str, last_modified: &str) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         self.conn.execute(
@@ -314,6 +432,17 @@ pub struct StoredTask {
     pub tokens_used: i64,
     pub created_at: Option<String>,
     pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CheckpointData {
+    pub id: String,
+    pub task_id: String,
+    pub session_id: String,
+    pub agent_type: String,
+    pub step: String,
+    pub partial_output: String,
+    pub files_read: String,
 }
 
 #[derive(Debug, Clone)]

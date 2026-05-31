@@ -126,7 +126,114 @@ impl BuildValidator {
 }
 
 impl Default for BuildValidator {
-    fn default() -> Self {
-        Self::new()
+    fn default() -> Self { Self::new() }
+}
+
+// ── Test runner ───────────────────────────────────────────────────────────────
+
+#[derive(Debug)]
+pub struct TestResult {
+    pub success: bool,
+    pub passed: u32,
+    pub failed: u32,
+    pub output: String,
+}
+
+impl BuildValidator {
+    /// Run the test suite after a successful build.
+    pub fn run_tests(&self, project_root: &std::path::Path, language: &str) -> TestResult {
+        info!("[BuildValidator] Running tests for {} at {}", language, project_root.display());
+        match language {
+            "rust" => self.cargo_test(project_root),
+            "node" | "vue" | "typescript" => self.npm_test(project_root),
+            "python" => self.pytest(project_root),
+            "go" => self.go_test(project_root),
+            _ => TestResult { success: true, passed: 0, failed: 0, output: "No test runner for this language.".to_string() },
+        }
     }
+
+    fn cargo_test(&self, root: &std::path::Path) -> TestResult {
+        let out = Command::new("cargo")
+            .args(["test", "--no-fail-fast", "2>&1"])
+            .current_dir(root)
+            .output();
+
+        let combined = match out {
+            Ok(o) => format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)),
+            Err(e) => return TestResult { success: false, passed: 0, failed: 1, output: e.to_string() },
+        };
+
+        let (passed, failed) = parse_cargo_test_counts(&combined);
+        let success = failed == 0;
+        info!("[BuildValidator] cargo test: {} passed, {} failed", passed, failed);
+        TestResult { success, passed, failed, output: combined }
+    }
+
+    fn npm_test(&self, root: &std::path::Path) -> TestResult {
+        let out = Command::new("npm")
+            .args(["test", "--", "--passWithNoTests"])
+            .current_dir(root)
+            .output();
+
+        match out {
+            Ok(o) => {
+                let combined = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+                let success = o.status.success();
+                TestResult { success, passed: 0, failed: 0, output: combined }
+            }
+            Err(e) => TestResult { success: false, passed: 0, failed: 1, output: e.to_string() },
+        }
+    }
+
+    fn pytest(&self, root: &std::path::Path) -> TestResult {
+        let out = Command::new("python3")
+            .args(["-m", "pytest", "--tb=short", "-q"])
+            .current_dir(root)
+            .output();
+
+        match out {
+            Ok(o) => {
+                let combined = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+                let success = o.status.success();
+                TestResult { success, passed: 0, failed: 0, output: combined }
+            }
+            Err(e) => TestResult { success: false, passed: 0, failed: 1, output: e.to_string() },
+        }
+    }
+
+    fn go_test(&self, root: &std::path::Path) -> TestResult {
+        let out = Command::new("go")
+            .args(["test", "./...", "-v"])
+            .current_dir(root)
+            .output();
+
+        match out {
+            Ok(o) => {
+                let combined = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+                let success = o.status.success();
+                TestResult { success, passed: 0, failed: 0, output: combined }
+            }
+            Err(e) => TestResult { success: false, passed: 0, failed: 1, output: e.to_string() },
+        }
+    }
+}
+
+fn parse_cargo_test_counts(output: &str) -> (u32, u32) {
+    // "test result: ok. 5 passed; 0 failed;"
+    for line in output.lines() {
+        if line.contains("test result") {
+            let passed = extract_count(line, "passed");
+            let failed = extract_count(line, "failed");
+            return (passed, failed);
+        }
+    }
+    (0, 0)
+}
+
+fn extract_count(line: &str, keyword: &str) -> u32 {
+    line.split(';')
+        .find(|seg| seg.contains(keyword))
+        .and_then(|seg| seg.split_whitespace().find(|w| w.chars().all(|c| c.is_ascii_digit())))
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0)
 }

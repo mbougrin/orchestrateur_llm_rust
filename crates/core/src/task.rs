@@ -36,8 +36,12 @@ pub struct Task {
     pub status: TaskStatus,
     pub retry_count: u8,
     pub tokens_used: u32,
+    pub estimated_tokens: u32,
     pub result: Option<String>,
     pub error: Option<String>,
+    /// (path, old_content, new_content) populated by BuilderAgent
+    #[serde(skip)]
+    pub file_diffs: Vec<(String, String, String)>,
 }
 
 impl Task {
@@ -54,8 +58,10 @@ impl Task {
             status: TaskStatus::Pending,
             retry_count: 0,
             tokens_used: 0,
+            estimated_tokens: 0,
             result: None,
             error: None,
+            file_diffs: Vec::new(),
         }
     }
 

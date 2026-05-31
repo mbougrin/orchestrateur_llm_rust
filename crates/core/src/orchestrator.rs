@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 use tracing::{info, warn};
-use crate::context::AppContext;
+use crate::context::{AppContext, CostProfile};
 use crate::dispatcher::Dispatcher;
 use crate::task::{Task, TaskStatus};
 
@@ -35,6 +35,13 @@ impl Orchestrator {
     pub fn plan_from_prompt(&self, prompt: &str) -> Vec<Task> {
         info!("[Orchestrator] Planning tasks for: {}", prompt);
 
+        // Enrich tasks with git context (injected in system prompts by agents via ctx)
+        let git_ctx = file_analyzer::git_context(&self.ctx.project_path);
+        if !git_ctx.is_empty() {
+            info!("[Orchestrator] Git context: branch={}, {} changed files",
+                git_ctx.branch, git_ctx.status.len());
+        }
+
         // Simple heuristic planning: detect multiple intents separated by "+" or newlines
         let sub_prompts: Vec<&str> = prompt
             .split(|c| c == '+' || c == '\n')
@@ -42,13 +49,34 @@ impl Orchestrator {
             .filter(|s| !s.is_empty())
             .collect();
 
-        if sub_prompts.len() <= 1 {
+        let mut tasks: Vec<Task> = if sub_prompts.len() <= 1 {
             vec![self.dispatcher.build_task(prompt, &[])]
         } else {
             sub_prompts.iter()
                 .map(|p| self.dispatcher.build_task(p, &[]))
                 .collect()
+        };
+
+        // Apply cost profile override
+        match self.ctx.profile {
+            CostProfile::Balanced => {}
+            CostProfile::Quality => {
+                for t in &mut tasks {
+                    t.assigned_model = if t.priority == crate::task::Priority::Low {
+                        llm_clients::LlmModel::ClaudeHaiku
+                    } else {
+                        llm_clients::LlmModel::ClaudeSonnet
+                    };
+                }
+            }
+            CostProfile::Cheap => {
+                for t in &mut tasks {
+                    t.assigned_model = llm_clients::LlmModel::Local;
+                }
+            }
         }
+
+        tasks
     }
 
     pub fn enqueue_tasks(&self, tasks: Vec<Task>) {

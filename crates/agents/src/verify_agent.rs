@@ -52,17 +52,37 @@ impl Agent for VerifyAgent {
             move || validator.validate(&root, &lang)
         }).await?;
 
-        if result.success {
-            let msg = format!("Build OK ({})", lang);
+        if !result.success {
+            let errors = result.output;
+            info!("[VerifyAgent] Build failed:\n{}", errors);
+            anyhow::bail!("build_error:\n{}", errors);
+        }
+
+        // Build OK — now run tests
+        let test_result = tokio::task::spawn_blocking({
+            let root = self.project_root.clone();
+            let lang = lang.to_string();
+            let v2 = BuildValidator::new();
+            move || v2.run_tests(&root, &lang)
+        }).await?;
+
+        if test_result.success {
+            let msg = if test_result.passed > 0 {
+                format!("Build OK + {} tests passed ({})", test_result.passed, lang)
+            } else {
+                format!("Build OK — no tests ({})", lang)
+            };
             info!("[VerifyAgent] {}", msg);
             task.mark_done(msg.clone(), 0);
             Ok(msg)
         } else {
-            // Return the errors so the caller can retry with the coder
-            let errors = result.output;
-            info!("[VerifyAgent] Build failed:\n{}", errors);
-            // Don't mark_failed here — caller (dispatch loop) decides whether to retry
-            anyhow::bail!("build_error:\n{}", errors);
+            let test_out = if test_result.output.len() > 3000 {
+                format!("{}\n[truncated…]", &test_result.output[..3000])
+            } else {
+                test_result.output.clone()
+            };
+            info!("[VerifyAgent] Tests failed ({} failed)", test_result.failed);
+            anyhow::bail!("test_error:\n## Tests échoués ({} failed)\n{}", test_result.failed, test_out);
         }
     }
 }

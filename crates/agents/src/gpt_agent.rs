@@ -32,6 +32,16 @@ impl Agent for GptAgent {
         let (response, usage) = client.complete(system, &user_msg, 4096).await?;
 
         ctx.record_usage(&LlmModel::Gpt, &usage);
+
+        if ctx.verbose {
+            info!("[GptAgent][verbose] Response:\n{}", &response[..response.len().min(2000)]);
+        }
+        match crate::builder_agent::write_and_track(&response, &ctx.project_path, task) {
+            Ok(w) if !w.is_empty() => info!("[GptAgent] Wrote {} file(s): {}", w.len(), w.join(", ")),
+            Err(e) => info!("[GptAgent] File write error: {}", e),
+            _ => {}
+        }
+
         let tokens = usage.input_tokens + usage.output_tokens;
         task.mark_done(response.clone(), tokens);
 

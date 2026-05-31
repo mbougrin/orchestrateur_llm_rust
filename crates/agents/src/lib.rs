@@ -7,6 +7,8 @@ pub mod grok_agent;
 pub mod gpt_agent;
 pub mod builder_agent;
 pub mod verify_agent;
+pub mod context_builder;
+pub mod shell_tool;
 
 use async_trait::async_trait;
 use anyhow::Result;

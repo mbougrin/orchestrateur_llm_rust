@@ -28,3 +28,5 @@ agents = { path = "../agents" }
 llm_clients = { path = "../llm_clients" }
 local_llm = { path = "../local_llm" }
 context_store = { path = "../context_store" }
+file_analyzer = { path = "../file_analyzer" }
+similar = "2"

@@ -30,7 +30,32 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="4c0df71a-281c-4ba0-af14-56eb4d4ee8a3" name="Changes" comment="">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Cargo.lock" beforeDir="false" afterPath="$PROJECT_DIR$/Cargo.lock" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crates/agents/src/build_agent.rs" beforeDir="false" afterPath="$PROJECT_DIR$/crates/agents/src/build_agent.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crates/agents/src/builder_agent.rs" beforeDir="false" afterPath="$PROJECT_DIR$/crates/agents/src/builder_agent.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crates/agents/src/doc_agent.rs" beforeDir="false" afterPath="$PROJECT_DIR$/crates/agents/src/doc_agent.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crates/agents/src/frontend_agent.rs" beforeDir="false" afterPath="$PROJECT_DIR$/crates/agents/src/frontend_agent.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crates/agents/src/gpt_agent.rs" beforeDir="false" afterPath="$PROJECT_DIR$/crates/agents/src/gpt_agent.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crates/agents/src/grok_agent.rs" beforeDir="false" afterPath="$PROJECT_DIR$/crates/agents/src/grok_agent.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crates/agents/src/lib.rs" beforeDir="false" afterPath="$PROJECT_DIR$/crates/agents/src/lib.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crates/agents/src/rust_agent.rs" beforeDir="false" afterPath="$PROJECT_DIR$/crates/agents/src/rust_agent.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crates/agents/src/verify_agent.rs" beforeDir="false" afterPath="$PROJECT_DIR$/crates/agents/src/verify_agent.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crates/context_store/src/store.rs" beforeDir="false" afterPath="$PROJECT_DIR$/crates/context_store/src/store.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crates/core/src/context.rs" beforeDir="false" afterPath="$PROJECT_DIR$/crates/core/src/context.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crates/core/src/orchestrator.rs" beforeDir="false" afterPath="$PROJECT_DIR$/crates/core/src/orchestrator.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crates/core/src/task.rs" beforeDir="false" afterPath="$PROJECT_DIR$/crates/core/src/task.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crates/file_analyzer/Cargo.toml" beforeDir="false" afterPath="$PROJECT_DIR$/crates/file_analyzer/Cargo.toml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crates/file_analyzer/src/lib.rs" beforeDir="false" afterPath="$PROJECT_DIR$/crates/file_analyzer/src/lib.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crates/llm_clients/Cargo.toml" beforeDir="false" afterPath="$PROJECT_DIR$/crates/llm_clients/Cargo.toml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crates/llm_clients/src/anthropic.rs" beforeDir="false" afterPath="$PROJECT_DIR$/crates/llm_clients/src/anthropic.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crates/llm_clients/src/gemini.rs" beforeDir="false" afterPath="$PROJECT_DIR$/crates/llm_clients/src/gemini.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crates/llm_clients/src/lib.rs" beforeDir="false" afterPath="$PROJECT_DIR$/crates/llm_clients/src/lib.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crates/tui/Cargo.toml" beforeDir="false" afterPath="$PROJECT_DIR$/crates/tui/Cargo.toml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crates/tui/src/app.rs" beforeDir="false" afterPath="$PROJECT_DIR$/crates/tui/src/app.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crates/tui/src/components/mod.rs" beforeDir="false" afterPath="$PROJECT_DIR$/crates/tui/src/components/mod.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/crates/tui/src/ui.rs" beforeDir="false" afterPath="$PROJECT_DIR$/crates/tui/src/ui.rs" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -101,7 +126,7 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1780224400939</updated>
-      <workItem from="1780224402069" duration="22102000" />
+      <workItem from="1780224402069" duration="25681000" />
     </task>
     <servers />
   </component>

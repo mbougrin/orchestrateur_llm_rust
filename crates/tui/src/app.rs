@@ -6,8 +6,10 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::{
+    collections::HashMap,
     io,
     path::PathBuf,
+    sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::sync::mpsc;
@@ -20,11 +22,19 @@ use tokenmind_core::{
 };
 use llm_clients::LlmModel;
 use agents;
+use file_analyzer;
 
 use crate::ui;
 
 const REFRESH_RATE: u64 = 100;
 const SYS_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ViewMode {
+    Normal,
+    Logs,
+    Diff,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ModelState {
@@ -58,11 +68,22 @@ pub struct App {
     pub running: bool,
     pub status_message: Option<String>,
     pub model_state: ModelState,
+    pub view_mode: ViewMode,
+    /// (path, old_content, new_content) — last N file writes
+    pub diff_history: Vec<(String, String, String)>,
     // API key status
     pub api_anthropic_ok: bool,
     pub api_gemini_ok: bool,
     pub api_grok_ok: bool,
     pub api_gpt_ok: bool,
+    // Streaming: accumulated text per task, cleared on TaskCompleted
+    pub active_streams: HashMap<Uuid, String>,
+    // Prompt history (T15)
+    pub prompt_history: Vec<String>,
+    pub history_idx: Option<usize>,
+    // /btw model override overlay
+    pub btw_overlay: bool,
+    pub btw_model_override: Option<LlmModel>,
     // System metrics (refreshed every 2 s)
     pub sys: System,
     pub last_sys_refresh: Instant,
@@ -75,6 +96,9 @@ pub enum AppEvent {
     TaskStarted { id: Uuid, description: String, model: String },
     TaskCompleted(Task),
     TaskFailed(Task),
+    StreamChunk { task_id: Uuid, chunk: String },
+    /// (path, before, after) tuples from BuilderAgent
+    FilesWritten(Vec<(String, String, String)>),
     Log(String),
     ModelStatus(ModelState),
 }
@@ -88,16 +112,33 @@ impl App {
         gpt_key: String,
     ) -> Result<Self> {
         let session_id = Uuid::new_v4().to_string();
-        let ctx = AppContext::new(
+        let mut ctx = AppContext::new(
             session_id,
-            project_path,
+            project_path.clone(),
             anthropic_key,
             gemini_key,
             grok_key,
             gpt_key,
         );
-        let orchestrator = Orchestrator::new(ctx.clone());
+
+        // Load project memory from ORCHESTRATEUR.md / .orchestrateur/instructions.md / CLAUDE.md
+        ctx.project_memory = load_project_memory(&project_path);
+
         let (event_tx, event_rx) = mpsc::channel(64);
+
+        // Wire up stream sink: agents send (task_id, chunk) here → forwarded as AppEvent::StreamChunk
+        let (stream_tx, mut stream_rx) = tokio::sync::mpsc::unbounded_channel::<(Uuid, String)>();
+        ctx.stream_sink = Some(Arc::new(stream_tx));
+        {
+            let fwd_tx = event_tx.clone();
+            tokio::spawn(async move {
+                while let Some((task_id, chunk)) = stream_rx.recv().await {
+                    let _ = fwd_tx.send(AppEvent::StreamChunk { task_id, chunk }).await;
+                }
+            });
+        }
+
+        let orchestrator = Orchestrator::new(ctx.clone());
 
         let has_anthropic = !ctx.anthropic_key.is_empty() && !ctx.anthropic_key.contains("REPLACE_ME");
         let has_gemini    = !ctx.gemini_key.is_empty()    && !ctx.gemini_key.contains("REPLACE_ME");
@@ -180,10 +221,17 @@ impl App {
             running: true,
             status_message: None,
             model_state: ModelState::Idle,
+            view_mode: ViewMode::Normal,
+            diff_history: Vec::new(),
             api_anthropic_ok: has_anthropic,
             api_gemini_ok: has_gemini,
             api_grok_ok: has_grok,
             api_gpt_ok: has_gpt,
+            active_streams: HashMap::new(),
+            prompt_history: Vec::new(),
+            history_idx: None,
+            btw_overlay: false,
+            btw_model_override: None,
             sys,
             last_sys_refresh: Instant::now(),
             event_tx,
@@ -205,9 +253,21 @@ impl App {
             terminal.draw(|f| ui::draw(f, self))?;
 
             let timeout = tick_rate.saturating_sub(last_tick.elapsed());
-            if crossterm::event::poll(timeout)? {
-                if let Event::Key(key) = event::read()? {
-                    self.handle_key(key.code, key.modifiers).await;
+
+            // Poll for keyboard events OR Ctrl+C signal
+            tokio::select! {
+                biased;
+                _ = tokio::signal::ctrl_c() => {
+                    self.log("[session] Ctrl+C — session pausée. Tapez /resume pour reprendre ou ESC pour quitter.".to_string());
+                    self.status_message = Some("Session pausée (Ctrl+C) — /resume ou ESC".to_string());
+                    // Don't exit — let the user choose
+                }
+                _ = tokio::time::sleep(Duration::ZERO) => {
+                    if crossterm::event::poll(timeout)? {
+                        if let Event::Key(key) = event::read()? {
+                            self.handle_key(key.code, key.modifiers).await;
+                        }
+                    }
                 }
             }
 
@@ -242,6 +302,35 @@ impl App {
     }
 
     async fn handle_key(&mut self, key: KeyCode, modifiers: KeyModifiers) {
+        // /btw overlay consumes keys before the rest of the UI
+        if self.btw_overlay {
+            match key {
+                KeyCode::Char('1') => {
+                    self.btw_model_override = Some(LlmModel::ClaudeSonnet);
+                    self.btw_overlay = false;
+                    self.log("[btw] Override : claude-sonnet-4-5".to_string());
+                }
+                KeyCode::Char('2') => {
+                    self.btw_model_override = Some(LlmModel::ClaudeHaiku);
+                    self.btw_overlay = false;
+                    self.log("[btw] Override : claude-haiku-4-5".to_string());
+                }
+                KeyCode::Char('3') => {
+                    self.btw_model_override = Some(LlmModel::Gemini);
+                    self.btw_overlay = false;
+                    self.log("[btw] Override : gemini-2.0-flash".to_string());
+                }
+                KeyCode::Char('0') => {
+                    self.btw_model_override = None;
+                    self.btw_overlay = false;
+                    self.log("[btw] Override supprimé — routage automatique.".to_string());
+                }
+                KeyCode::Esc => { self.btw_overlay = false; }
+                _ => {}
+            }
+            return;
+        }
+
         match key {
             KeyCode::Esc => self.running = false,
             KeyCode::Enter => {
@@ -272,8 +361,41 @@ impl App {
             KeyCode::Right => {
                 if self.cursor_pos < self.input.len() { self.cursor_pos += 1; }
             }
+            // T15: prompt history navigation
+            KeyCode::Up => {
+                if self.prompt_history.is_empty() { return; }
+                let next_idx = match self.history_idx {
+                    None => self.prompt_history.len() - 1,
+                    Some(0) => 0,
+                    Some(i) => i - 1,
+                };
+                self.history_idx = Some(next_idx);
+                self.input = self.prompt_history[next_idx].clone();
+                self.cursor_pos = self.input.len();
+            }
+            KeyCode::Down => {
+                match self.history_idx {
+                    None => {}
+                    Some(i) if i + 1 >= self.prompt_history.len() => {
+                        self.history_idx = None;
+                        self.input.clear();
+                        self.cursor_pos = 0;
+                    }
+                    Some(i) => {
+                        let next = i + 1;
+                        self.history_idx = Some(next);
+                        self.input = self.prompt_history[next].clone();
+                        self.cursor_pos = self.input.len();
+                    }
+                }
+            }
             KeyCode::Tab => {
-                self.show_logs = !self.show_logs;
+                self.view_mode = match self.view_mode {
+                    ViewMode::Normal => ViewMode::Logs,
+                    ViewMode::Logs   => ViewMode::Diff,
+                    ViewMode::Diff   => ViewMode::Normal,
+                };
+                self.show_logs = self.view_mode == ViewMode::Logs;
             }
             _ => {}
         }
@@ -281,6 +403,17 @@ impl App {
 
     async fn handle_input(&mut self, input: String) {
         self.log(format!("> {}", input));
+        self.history_idx = None;
+
+        // T15: save to prompt history (cap at 200 entries)
+        if !input.starts_with('/') || input.len() > 1 {
+            if self.prompt_history.last().map(|s| s.as_str()) != Some(&input) {
+                self.prompt_history.push(input.clone());
+                if self.prompt_history.len() > 200 {
+                    self.prompt_history.remove(0);
+                }
+            }
+        }
 
         if input.starts_with('/') {
             self.handle_slash_command(&input).await;
@@ -293,6 +426,24 @@ impl App {
         let parts: Vec<&str> = cmd.splitn(3, ' ').collect();
         match parts[0] {
             "/clear" => {
+                // T18: auto-summary before clearing
+                let done = self.task_history.iter().filter(|t| t.status == TaskStatus::Done).count();
+                let failed = self.task_history.iter().filter(|t| t.status == TaskStatus::Failed).count();
+                if done + failed > 0 {
+                    let names: Vec<String> = self.task_history.iter()
+                        .filter(|t| t.status == TaskStatus::Done)
+                        .take(5)
+                        .map(|t| t.description.chars().take(30).collect::<String>())
+                        .collect();
+                    let cost = self.ctx.total_cost();
+                    self.log(format!(
+                        "[session] {} done / {} failed — cost ${:.4} — dernières: {}",
+                        done, failed, cost, names.join("; ")
+                    ));
+                }
+                self.task_history.clear();
+                self.diff_history.clear();
+                self.active_streams.clear();
                 self.log("Context cleared.".to_string());
                 self.status_message = Some("Context cleared".to_string());
             }
@@ -353,7 +504,15 @@ impl App {
                 }
             }
             "/log" => {
-                self.show_logs = !self.show_logs;
+                self.view_mode = ViewMode::Logs;
+                self.show_logs = true;
+            }
+            "/diff" => {
+                self.view_mode = ViewMode::Diff;
+                self.show_logs = false;
+                if self.diff_history.is_empty() {
+                    self.log("[diff] Aucun diff disponible pour le moment.".to_string());
+                }
             }
             "/plan" => {
                 if parts.len() > 1 {
@@ -368,10 +527,280 @@ impl App {
             "/btw" => {
                 if parts.len() > 1 {
                     self.log(format!("[note] {}", parts[1..].join(" ")));
+                } else {
+                    self.btw_overlay = !self.btw_overlay;
+                    if self.btw_overlay {
+                        self.log("[btw] 1=Sonnet  2=Haiku  3=Gemini  0=auto  ESC=annuler".to_string());
+                    }
+                }
+            }
+            "/autowrite" => {
+                match parts.get(1).copied().unwrap_or("") {
+                    "on"  => {
+                        self.ctx.auto_write = true;
+                        self.log("[autowrite] Écriture automatique activée.".to_string());
+                    }
+                    "off" => {
+                        self.ctx.auto_write = false;
+                        self.log("[autowrite] Écriture désactivée — /diff pour réviser avant écriture.".to_string());
+                    }
+                    _ => { self.log("[autowrite] Usage : /autowrite on|off".to_string()); }
+                }
+            }
+            "/add" => {
+                let path_arg = parts.get(1).copied().unwrap_or("").to_string();
+                if path_arg.is_empty() {
+                    self.log("[add] Usage : /add <chemin>".to_string());
+                } else {
+                    let full = if std::path::Path::new(&path_arg).is_absolute() {
+                        PathBuf::from(&path_arg)
+                    } else {
+                        self.ctx.project_path.join(&path_arg)
+                    };
+                    let msg = match std::fs::read_to_string(&full) {
+                        Ok(content) => {
+                            let msg = if let Ok(mut manual) = self.ctx.manual_context.lock() {
+                                if let Some(entry) = manual.iter_mut().find(|(p, _)| p == &path_arg) {
+                                    entry.1 = content.clone();
+                                    format!("[add] Mis à jour : {} ({} chars)", path_arg, content.len())
+                                } else {
+                                    manual.push((path_arg.clone(), content.clone()));
+                                    format!("[add] Ajouté : {} ({} chars)", path_arg, content.len())
+                                }
+                            } else {
+                                "[add] Erreur verrou manual_context.".to_string()
+                            };
+                            msg
+                        }
+                        Err(e) => format!("[add] Erreur lecture {} : {}", path_arg, e),
+                    };
+                    self.log(msg);
+                }
+            }
+            "/context" => {
+                let sub = parts.get(1).copied().unwrap_or("");
+                match sub {
+                    "list" => {
+                        let lines: Vec<String> = if let Ok(manual) = self.ctx.manual_context.lock() {
+                            if manual.is_empty() {
+                                vec!["[context] Aucun fichier en contexte manuel.".to_string()]
+                            } else {
+                                manual.iter()
+                                    .map(|(p, c)| format!("  {} ({} chars)", p, c.len()))
+                                    .collect()
+                            }
+                        } else {
+                            vec!["[context] Erreur verrou.".to_string()]
+                        };
+                        for line in lines { self.log(line); }
+                    }
+                    "rm" => {
+                        let path_arg = parts.get(2).copied().unwrap_or("").to_string();
+                        if path_arg.is_empty() {
+                            self.log("[context] Usage : /context rm <chemin>".to_string());
+                        } else {
+                            let msg = if let Ok(mut manual) = self.ctx.manual_context.lock() {
+                                let before = manual.len();
+                                manual.retain(|(p, _)| p != &path_arg);
+                                if manual.len() < before {
+                                    format!("[context] Retiré : {}", path_arg)
+                                } else {
+                                    format!("[context] Non trouvé : {}", path_arg)
+                                }
+                            } else {
+                                "[context] Erreur verrou.".to_string()
+                            };
+                            self.log(msg);
+                        }
+                    }
+                    _ => { self.log("[context] Sous-commandes : list | rm <chemin>".to_string()); }
+                }
+            }
+            "/memory" => {
+                let sub = parts.get(1).copied().unwrap_or("");
+                match sub {
+                    "show" => {
+                        if self.ctx.project_memory.is_empty() {
+                            self.log("[memory] Aucune mémoire projet (ORCHESTRATEUR.md absent).".to_string());
+                        } else {
+                            self.log(format!("[memory]\n{}", self.ctx.project_memory));
+                        }
+                    }
+                    "clear" => {
+                        let path = self.ctx.project_path.join("ORCHESTRATEUR.md");
+                        let _ = std::fs::write(&path, "");
+                        self.ctx.project_memory.clear();
+                        self.log("[memory] ORCHESTRATEUR.md vidé.".to_string());
+                    }
+                    "add" => {
+                        let note = parts.get(2..).map(|p| p.join(" ")).unwrap_or_default();
+                        if note.is_empty() {
+                            self.log("[memory] Usage : /memory add <texte>".to_string());
+                        } else {
+                            let path = self.ctx.project_path.join("ORCHESTRATEUR.md");
+                            let mut content = std::fs::read_to_string(&path).unwrap_or_default();
+                            if !content.ends_with('\n') && !content.is_empty() { content.push('\n'); }
+                            content.push_str(&format!("- {}\n", note));
+                            let _ = std::fs::write(&path, &content);
+                            self.ctx.project_memory = content;
+                            self.log(format!("[memory] Ajouté : {}", note));
+                        }
+                    }
+                    _ => {
+                        self.log("[memory] Sous-commandes : add <texte> | show | clear".to_string());
+                    }
+                }
+            }
+            "/git" => {
+                let sub = parts.get(1).copied().unwrap_or("");
+                match sub {
+                    "status" => {
+                        let git = file_analyzer::git_context(&self.ctx.project_path);
+                        self.ctx.git = git.clone();
+                        if git.is_empty() {
+                            self.log("[git] Pas de dépôt git dans ce répertoire.".to_string());
+                        } else {
+                            self.log(format!("[git] Branche: {}", git.branch));
+                            for (path, status) in &git.status {
+                                self.log(format!("  {} {}", status, path));
+                            }
+                        }
+                    }
+                    "commit" => {
+                        // Refresh git context, then queue a local task to generate commit msg
+                        let git = file_analyzer::git_context(&self.ctx.project_path);
+                        self.ctx.git = git.clone();
+                        if git.status.is_empty() {
+                            self.log("[git] Rien à committer (working tree clean).".to_string());
+                        } else {
+                            let diff_summary = git.status.iter()
+                                .map(|(p, c)| format!("{} {}", c, p))
+                                .collect::<Vec<_>>().join(", ");
+                            self.log(format!("[git] Génération du message de commit pour : {}", diff_summary));
+                            let prompt = format!(
+                                "Generate a concise git commit message (50 chars max subject, \
+                                imperative mood) for these changes:\n{}\n\nDiff:\n{}",
+                                diff_summary, &git.recent_diff
+                            );
+                            // Enqueue as a Low-priority local task
+                            let mut tasks = self.orchestrator.plan_from_prompt(&prompt);
+                            for t in &mut tasks {
+                                t.assigned_model = LlmModel::Local;
+                            }
+                            let count = tasks.len();
+                            self.orchestrator.enqueue_tasks(tasks.clone());
+                            for t in tasks { self.task_history.push(t); }
+                            self.log(format!("[git] {} tâche(s) de commit queued.", count));
+                        }
+                    }
+                    "log" => {
+                        let git = file_analyzer::git_context(&self.ctx.project_path);
+                        for c in &git.last_commits {
+                            self.log(format!("  {}", c));
+                        }
+                    }
+                    _ => {
+                        self.log("[git] Sous-commandes : status | commit | log".to_string());
+                    }
+                }
+            }
+            "/verbose" => {
+                self.ctx.verbose = !self.ctx.verbose;
+                if self.ctx.verbose {
+                    self.log("[verbose] Mode verbeux activé — réponses LLM complètes dans les logs.".to_string());
+                } else {
+                    self.log("[verbose] Mode verbeux désactivé.".to_string());
+                }
+            }
+            "/profile" => {
+                use tokenmind_core::context::CostProfile;
+                let sub = parts.get(1).copied().unwrap_or("");
+                match sub {
+                    "quality" => {
+                        self.ctx.profile = CostProfile::Quality;
+                        self.orchestrator.ctx.profile = CostProfile::Quality;
+                        self.log("[profile] Quality — Sonnet pour tout, Haiku pour les tâches Low.".to_string());
+                    }
+                    "balanced" => {
+                        self.ctx.profile = CostProfile::Balanced;
+                        self.orchestrator.ctx.profile = CostProfile::Balanced;
+                        self.log("[profile] Balanced — routage automatique par priorité (défaut).".to_string());
+                    }
+                    "cheap" => {
+                        self.ctx.profile = CostProfile::Cheap;
+                        self.orchestrator.ctx.profile = CostProfile::Cheap;
+                        self.log("[profile] Cheap — toutes les tâches en local (coût $0).".to_string());
+                    }
+                    _ => {
+                        let cur = match self.ctx.profile {
+                            CostProfile::Quality  => "quality",
+                            CostProfile::Balanced => "balanced",
+                            CostProfile::Cheap    => "cheap",
+                        };
+                        self.log(format!("[profile] Actuel : {}  — options : quality | balanced | cheap", cur));
+                    }
+                }
+            }
+            "/doctor" => {
+                self.log("[doctor] Diagnostic système :".to_string());
+                // API keys
+                self.log(format!("  Anthropic : {}", if self.api_anthropic_ok { "✓ ok" } else { "✗ absent" }));
+                self.log(format!("  Gemini    : {}", if self.api_gemini_ok    { "✓ ok" } else { "✗ absent" }));
+                self.log(format!("  Grok      : {}", if self.api_grok_ok      { "✓ ok" } else { "✗ absent" }));
+                self.log(format!("  GPT       : {}", if self.api_gpt_ok       { "✓ ok" } else { "✗ absent" }));
+                // Local model
+                let local_status = match &self.model_state {
+                    ModelState::Ready        => "✓ prêt",
+                    ModelState::Loading      => "… chargement",
+                    ModelState::Downloading  => "… téléchargement",
+                    ModelState::Failed(_)    => "✗ échec",
+                    ModelState::Idle         => "○ idle",
+                };
+                self.log(format!("  Local LLM : {}", local_status));
+                // Project path
+                let path = self.ctx.project_path.clone();
+                let path_ok = path.exists() && path.is_dir();
+                let writable = std::fs::write(path.join(".orch_probe"), b"").map(|_| {
+                    let _ = std::fs::remove_file(path.join(".orch_probe"));
+                    true
+                }).unwrap_or(false);
+                self.log(format!("  Projet    : {} {}", path.display(),
+                    if path_ok && writable { "✓" } else if path_ok { "⚠ lecture seule" } else { "✗ introuvable" }));
+                // cargo in PATH
+                let cargo_ok = std::process::Command::new("cargo").arg("--version")
+                    .output().map(|o| o.status.success()).unwrap_or(false);
+                self.log(format!("  cargo     : {}", if cargo_ok { "✓ ok" } else { "✗ non trouvé" }));
+                // git in PATH
+                let git_ok = std::process::Command::new("git").arg("--version")
+                    .output().map(|o| o.status.success()).unwrap_or(false);
+                self.log(format!("  git       : {}", if git_ok { "✓ ok" } else { "✗ non trouvé" }));
+                // Context manual
+                let manual_count = self.ctx.manual_context.lock().map(|m| m.len()).unwrap_or(0);
+                self.log(format!("  /add      : {} fichier(s) en contexte manuel", manual_count));
+                // Profile + verbose
+                use tokenmind_core::context::CostProfile;
+                let profile_str = match self.ctx.profile {
+                    CostProfile::Quality  => "quality",
+                    CostProfile::Balanced => "balanced",
+                    CostProfile::Cheap    => "cheap",
+                };
+                self.log(format!("  Profil    : {}  verbose: {}", profile_str, if self.ctx.verbose { "on" } else { "off" }));
+            }
+            "/resume" => {
+                self.log("[resume] Vérification des tâches en attente…".to_string());
+                let pending = self.task_history.iter().filter(|t| t.status == TaskStatus::Pending).count();
+                if pending > 0 {
+                    self.log(format!("[resume] {} tâche(s) en attente, relancement…", pending));
+                } else {
+                    self.log("[resume] Aucune tâche en attente.".to_string());
                 }
             }
             "/help" => {
-                self.log("Commands: /clear /reset /status /cost /cancel /retry /log /plan <prompt> /btw <note> /export".to_string());
+                self.log("Commands: /clear /reset /status /cost /cancel /retry /log /diff /plan <prompt>".to_string());
+                self.log("          /btw [note]  /autowrite on|off  /add <path>  /context list|rm <path>".to_string());
+                self.log("          /verbose  /profile quality|balanced|cheap  /doctor".to_string());
+                self.log("          /memory add|show|clear  /git status|commit|log  /resume  /export".to_string());
+                self.log("          ↑/↓ navigate prompt history".to_string());
             }
             "/local" => {
                 if parts.len() > 1 {
@@ -389,9 +818,18 @@ impl App {
     }
 
     async fn handle_task_prompt(&mut self, prompt: String) {
-        let tasks = self.orchestrator.plan_from_prompt(&prompt);
+        let mut tasks = self.orchestrator.plan_from_prompt(&prompt);
         let task_count = tasks.len();
         self.log(format!("Planning {} task(s)…", task_count));
+
+        // Apply /btw model override if active (single-use, then clear)
+        if let Some(ref model) = self.btw_model_override.clone() {
+            for task in &mut tasks {
+                task.assigned_model = model.clone();
+            }
+            self.log(format!("[btw] Modèle forcé pour {} tâche(s) : {}", task_count, model.display_name()));
+            self.btw_model_override = None;
+        }
 
         self.orchestrator.enqueue_tasks(tasks.clone());
 
@@ -412,7 +850,20 @@ impl App {
                     t.mark_running();
                 }
             }
+            AppEvent::FilesWritten(diffs) => {
+                let count = diffs.len();
+                self.diff_history.extend(diffs);
+                // Keep last 20 file diffs
+                if self.diff_history.len() > 20 {
+                    self.diff_history.drain(0..self.diff_history.len() - 20);
+                }
+                self.log(format!("[diff] {} fichier(s) modifié(s). Tab→Diff pour voir.", count));
+            }
+            AppEvent::StreamChunk { task_id, chunk } => {
+                self.active_streams.entry(task_id).or_default().push_str(&chunk);
+            }
             AppEvent::TaskCompleted(task) => {
+                self.active_streams.remove(&task.id);
                 self.log(format!("[{}] Done: {} ({} tokens)", &task.id.to_string()[..8], task.description, task.tokens_used));
                 if let Some(t) = self.task_history.iter_mut().find(|t| t.id == task.id) {
                     *t = task.clone();
@@ -420,12 +871,17 @@ impl App {
                 self.orchestrator.complete_task(task);
             }
             AppEvent::TaskFailed(task) => {
+                self.active_streams.remove(&task.id);
                 let err = task.error.clone().unwrap_or_else(|| "unknown error".to_string());
                 if err.starts_with("rate_limit:") {
                     self.log(format!(
                         "[rate-limit] {} — quota API dépassé. Tapez /retry pour relancer en local.",
                         task.description
                     ));
+                } else if err.starts_with("test_error:") {
+                    self.log(format!("[tests] {} — tests échoués, erreurs renvoyées au coder.", task.description));
+                } else if err.starts_with("build_error:") {
+                    self.log(format!("[build] {} — erreur de compilation, relance prévue.", task.description));
                 } else {
                     self.log(format!("[{}] Failed: {} — {}", &task.id.to_string()[..8], task.description, err));
                 }
@@ -490,6 +946,10 @@ impl App {
 
                 match agent.execute(&mut task, &ctx).await {
                     Ok(_) => {
+                        // T19: propagate file diffs to the TUI diff panel
+                        if !task.file_diffs.is_empty() {
+                            let _ = tx.send(AppEvent::FilesWritten(task.file_diffs.clone())).await;
+                        }
                         let _ = tx.send(AppEvent::TaskCompleted(task)).await;
                     }
                     Err(e) => {
@@ -499,6 +959,10 @@ impl App {
                 }
             });
         }
+    }
+
+    pub fn has_active_stream(&self) -> bool {
+        !self.active_streams.is_empty()
     }
 
     fn generate_session_report(&self) -> String {
@@ -514,4 +978,22 @@ impl App {
         }
         report
     }
+}
+
+/// Look for ORCHESTRATEUR.md / .orchestrateur/instructions.md / CLAUDE.md in project root.
+fn load_project_memory(project_path: &std::path::Path) -> String {
+    let candidates = [
+        project_path.join("ORCHESTRATEUR.md"),
+        project_path.join(".orchestrateur").join("instructions.md"),
+        project_path.join("CLAUDE.md"),
+    ];
+    for path in &candidates {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            if !content.trim().is_empty() {
+                tracing::info!("[memory] Loaded project memory from {}", path.display());
+                return content;
+            }
+        }
+    }
+    String::new()
 }

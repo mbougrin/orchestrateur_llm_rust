@@ -3,6 +3,40 @@ pub mod gemini;
 pub mod grok;
 pub mod gpt;
 
+/// A chunk event emitted by a streaming LLM call.
+#[derive(Debug)]
+pub enum StreamEvent {
+    Chunk(String),
+    Done(TokenUsage),
+    Error(String),
+}
+
+/// Shared type: agents send `(task_id, chunk)` pairs here; the TUI relays them.
+pub type StreamSink = std::sync::Arc<tokio::sync::mpsc::UnboundedSender<(uuid::Uuid, String)>>;
+
+/// Convenience: accumulate a stream receiver into `(full_text, usage)`.
+pub async fn collect_stream(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<StreamEvent>,
+    sink: Option<&StreamSink>,
+    task_id: uuid::Uuid,
+) -> anyhow::Result<(String, TokenUsage)> {
+    let mut text = String::new();
+    let mut usage = TokenUsage::default();
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            StreamEvent::Chunk(chunk) => {
+                if let Some(s) = sink {
+                    let _ = s.send((task_id, chunk.clone()));
+                }
+                text.push_str(&chunk);
+            }
+            StreamEvent::Done(u) => { usage = u; }
+            StreamEvent::Error(e) => anyhow::bail!(e),
+        }
+    }
+    Ok((text, usage))
+}
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -109,6 +143,25 @@ pub enum MessageRole {
     User,
     Assistant,
     System,
+}
+
+/// Heuristic token estimator: ~4 chars ≈ 1 BPE token for code/English.
+pub fn estimate_tokens(text: &str) -> usize {
+    (text.len() + 3) / 4
+}
+
+/// Estimated input cost for `tokens` tokens on `model` (USD).
+pub fn estimate_cost_usd(tokens: usize, model: &LlmModel) -> f64 {
+    let p = TokenPricing::default();
+    let t = tokens as f64 / 1_000_000.0;
+    match model {
+        LlmModel::ClaudeSonnet => t * p.claude_sonnet_in,
+        LlmModel::ClaudeHaiku  => t * p.claude_haiku_in,
+        LlmModel::Gemini       => t * p.gemini_flash_in,
+        LlmModel::Grok         => t * p.grok_mini_in,
+        LlmModel::Gpt          => t * p.gpt_4o_mini_in,
+        LlmModel::Local        => 0.0,
+    }
 }
 
 pub struct TokenPricing {
