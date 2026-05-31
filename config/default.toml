@@ -1,0 +1,45 @@
+[models]
+rust_agent     = "claude-sonnet-4-5"
+frontend_agent = "claude-haiku-4-5"
+doc_agent      = "gemini-2.0-flash"
+# Modèle local : sélectionné automatiquement selon la RAM disponible
+# 3B  (≤ 8 Go RAM)  : bartowski/Qwen2.5-Coder-3B-Instruct-GGUF
+# 7B  (≤ 24 Go RAM) : bartowski/Qwen2.5-Coder-7B-Instruct-GGUF
+# 14B (> 24 Go RAM) : bartowski/Qwen2.5-Coder-14B-Instruct-GGUF
+
+[local_llm]
+# Téléchargement automatique depuis HuggingFace au premier lancement.
+# Pour forcer un modèle, définir MODEL_REPO + MODEL_FILE dans .env.
+enabled              = true
+confidence_threshold = 0.85   # en-dessous → escalade vers LLM cloud
+
+[context]
+max_history_messages     = 20
+auto_summarize_threshold = 10000
+summary_model            = "claude-haiku"
+
+[build_validation]
+enabled        = true
+rust_command   = "cargo check"
+node_command   = "npm run type-check"
+python_command = "python -m py_compile"
+go_command     = "go build ./..."
+max_retries    = 3
+
+[parallelism]
+max_concurrent_agents = 4
+agent_timeout_secs    = 120
+
+[cache]
+enabled     = true
+ttl_hours   = 24
+max_size_mb = 100
+
+[tui]
+refresh_rate_ms   = 100
+show_logs_default = false
+theme             = "dark"
+
+[cost_alert]
+warn_at_usd = 1.0
+stop_at_usd = 5.0

@@ -1,0 +1,41 @@
+[workspace]
+members = [
+    "crates/core",
+    "crates/agents",
+    "crates/llm_clients",
+    "crates/local_llm",
+    "crates/file_analyzer",
+    "crates/context_store",
+    "crates/tui",
+]
+resolver = "2"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+uuid = { version = "1", features = ["v4", "serde"] }
+sha2 = "0.10"
+hex = "0.4"
+rusqlite = { version = "0.31", features = ["bundled"] }
+ratatui = "0.27"
+crossterm = "0.27"
+tokio-util = "0.7"
+walkdir = "2"
+ignore = "0.4"
+toml = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+indicatif = "0.17"
+futures = "0.3"
+async-trait = "0.1"
+config = "0.14"
+dirs = "5"
+sysinfo = "0.31"
+hf-hub = "0.5"

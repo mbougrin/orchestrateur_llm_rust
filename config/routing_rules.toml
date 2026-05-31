@@ -1,0 +1,35 @@
+[rules]
+
+[[rules.local_first]]
+patterns = ["add comment", "rename variable", "fix typo", "format code", "add docstring"]
+model = "local"
+confidence_threshold = 0.85
+
+[[rules.rust]]
+extensions = [".rs", "Cargo.toml", "Cargo.lock"]
+keywords = ["impl ", "fn ", "trait ", "lifetime", "borrow", "unsafe", "async fn"]
+model = "claude-sonnet"
+max_context_tokens = 8000
+
+[[rules.frontend]]
+extensions = [".vue", ".jsx", ".tsx", ".html", ".css", ".scss", ".js", ".ts"]
+model = "claude-haiku"
+max_context_tokens = 6000
+
+[[rules.backend_light]]
+extensions = [".py", ".go", ".rb", ".php"]
+model = "claude-haiku"
+max_context_tokens = 6000
+
+[[rules.docs]]
+extensions = [".md", ".mdx", ".txt", ".rst", ".sh", ".bash", ".zsh"]
+model = "gemini"
+max_context_tokens = 32000
+
+[[rules.config]]
+extensions = [".json", ".yaml", ".yml", ".toml", ".env"]
+model = "claude-haiku"
+max_context_tokens = 2000
+
+[fallback]
+model = "claude-haiku"

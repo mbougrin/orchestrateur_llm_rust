@@ -1,0 +1,21 @@
+[package]
+name = "tokenmind-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+toml.workspace = true
+dirs.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+llm_clients = { path = "../llm_clients" }
+context_store = { path = "../context_store" }
+file_analyzer = { path = "../file_analyzer" }

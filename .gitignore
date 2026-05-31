@@ -1,0 +1,6 @@
+/target/
+.tokenMind/
+*.db
+*.log
+.env
+.DS_Store
